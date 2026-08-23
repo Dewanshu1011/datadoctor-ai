@@ -1,0 +1,11 @@
+customer_id,email,signup_date,order_total,status,region,source_system
+1001,ana@example.com,2025-01-12,125.50,complete,North,web
+1002,bob@example.com,2025-01-15,89.00,complete,West,web
+1002,bob@example.com,2025-01-15,89.00,complete,West,web
+1003,cara@example.com,not-a-date,110.25,pending,South,web
+1004,,2025-02-02,9999.99,complete,East,web
+1005,dev@example.com,2025-02-08,78.50,cancelled,North,web
+1006,eli@example,2025-02-10,92.10,complete,West,web
+1007,faye@example.com,2025-02-14,,complete,South,web
+1008,gus@example.com,2025-02-18,104.30,complete,East,web
+1009,hana@example.com,2025-02-20,95.20,complete,North,web
