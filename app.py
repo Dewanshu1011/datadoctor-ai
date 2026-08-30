@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 from pathlib import Path
 
 import pandas as pd
@@ -11,58 +13,54 @@ import streamlit as st
 from ai_analyzer import generate_ai_explanation, generate_fix
 from profiler import build_report, load_dataset, report_to_markdown
 
-
 ROOT = Path(__file__).parent
 SAMPLE_PATH = ROOT / "sample_data" / "customer_orders_demo.csv"
 
 st.set_page_config(page_title="DataDoctor AI", page_icon="🩺", layout="wide")
 
-# Streamlit Community Cloud exposes configured secrets through st.secrets; make
-# them available to the small service module without ever rendering the value.
+# Streamlit Community Cloud exposes configured secrets through st.secrets. Keep
+# application credentials server-side and never render their values.
 for _secret_name in ("OPENAI_API_KEY", "OPENAI_MODEL"):
     try:
         if not os.getenv(_secret_name) and st.secrets.get(_secret_name):
             os.environ[_secret_name] = str(st.secrets[_secret_name])
-    except FileNotFoundError:
+    except (FileNotFoundError, KeyError):
         pass
 
 
 # -------------------------------------------------------------------
-# Authentication
+# Authentication and authorization
 # -------------------------------------------------------------------
-# Add approved Google account emails here. If empty, any successfully
-# authenticated OIDC user is allowed to use the application.
-ALLOWED_EMAILS: set[str] = set()
-
 
 def auth_is_configured() -> bool:
     """Return whether Streamlit OIDC authentication has been configured."""
     try:
-        return bool(st.secrets.get("auth"))
-    except FileNotFoundError:
+        auth = st.secrets.get("auth")
+        return bool(auth and all(auth.get(k) for k in (
+            "redirect_uri", "cookie_secret", "client_id", "client_secret", "server_metadata_url"
+        )))
+    except (FileNotFoundError, KeyError, TypeError):
         return False
 
 
+def configured_allowed_emails() -> set[str]:
+    """Read an optional email allowlist from Streamlit secrets."""
+    try:
+        values = st.secrets.get("app", {}).get("allowed_emails", [])
+    except (FileNotFoundError, KeyError, TypeError):
+        return set()
+    if isinstance(values, str):
+        values = values.split(",")
+    return {str(value).lower().strip() for value in values if str(value).strip()}
+
+
 def require_authentication() -> None:
-    """Require an authenticated OIDC user before loading the application."""
+    """Require a valid OIDC login and, when configured, an approved email."""
     if not auth_is_configured():
         st.title("🩺 DataDoctor AI")
         st.error("Authentication is not configured yet.")
         st.markdown(
-            """
-            Add the `[auth]` section to this app's **Streamlit Cloud →
-            Settings → Secrets** and redeploy.
-
-            Required fields:
-            - `redirect_uri`
-            - `cookie_secret`
-            - `client_id`
-            - `client_secret`
-            - `server_metadata_url`
-
-            For Google, `server_metadata_url` is:
-            `https://accounts.google.com/.well-known/openid-configuration`
-            """
+            "Add the `[auth]` section to this app's **Streamlit Cloud → Settings → Secrets**."
         )
         st.stop()
 
@@ -71,7 +69,7 @@ def require_authentication() -> None:
         st.subheader("Sign in to continue")
         st.write(
             "Sign in with your Google account to use DataDoctor AI. "
-            "Your dataset is still profiled locally."
+            "Your dataset is profiled locally; only aggregated metadata is used for AI requests."
         )
         st.button(
             "Continue with Google",
@@ -82,8 +80,7 @@ def require_authentication() -> None:
         st.stop()
 
     email = str(st.user.get("email", "")).lower().strip()
-    allowed = {address.lower().strip() for address in ALLOWED_EMAILS}
-
+    allowed = configured_allowed_emails()
     if allowed and email not in allowed:
         st.error("Your account is not authorized to use DataDoctor AI.")
         if email:
@@ -92,11 +89,48 @@ def require_authentication() -> None:
         st.stop()
 
 
+# -------------------------------------------------------------------
+# Lightweight process-local AI rate limiter
+# -------------------------------------------------------------------
+
+@st.cache_resource
+
+def _rate_limiter() -> dict:
+    return {"lock": threading.Lock(), "events": {}}
+
+
+def ai_limits() -> tuple[int, int]:
+    """Return (max calls/hour/user, cooldown seconds) from optional secrets."""
+    try:
+        config = st.secrets.get("app", {})
+        max_calls = int(config.get("max_ai_calls_per_hour", 10))
+        cooldown = int(config.get("ai_cooldown_seconds", 3))
+    except (FileNotFoundError, KeyError, TypeError, ValueError):
+        max_calls, cooldown = 10, 3
+    return max(1, min(max_calls, 100)), max(0, min(cooldown, 60))
+
+
+def consume_ai_quota(user_key: str) -> tuple[bool, str]:
+    """Allow an AI request if the user is below the configured hourly limit."""
+    max_calls, cooldown = ai_limits()
+    now = time.time()
+    limiter = _rate_limiter()
+    with limiter["lock"]:
+        events = limiter["events"].setdefault(user_key, [])
+        events[:] = [timestamp for timestamp in events if now - timestamp < 3600]
+        if events and cooldown and now - events[-1] < cooldown:
+            wait = max(1, int(cooldown - (now - events[-1]) + 0.999))
+            return False, f"Please wait {wait} seconds before another AI request."
+        if len(events) >= max_calls:
+            return False, f"Hourly AI limit reached ({max_calls} requests). Please try again later."
+        events.append(now)
+        return True, f"{max_calls - len(events)} AI requests remaining this hour."
+
+
 def show_user_menu() -> None:
-    """Display the authenticated user's identity and logout control."""
+    """Display authenticated identity and privacy controls."""
     email = str(st.user.get("email", ""))
     name = str(st.user.get("name", "")) or email or "Authenticated user"
-
     with st.sidebar:
         st.divider()
         st.caption(f"Signed in as **{name}**")
@@ -117,8 +151,7 @@ def apply_styles() -> None:
         [data-testid="stSidebar"] [data-testid="stFileUploaderDropzone"] button { color: #18233e; }
         [data-testid="stSidebar"] .stButton button { border: 1px solid rgba(255,255,255,.25); background: rgba(255,255,255,.08); }
         [data-testid="stSidebar"] .stButton button:hover { border-color: #8ba3ff; background: rgba(106,133,255,.2); }
-        .hero { padding: 2rem 2.1rem; margin: .25rem 0 1.5rem; border-radius: 20px; color: white;
-                background: radial-gradient(circle at 90% 0%, #6785ff 0, transparent 31%), linear-gradient(120deg, #101c35 0%, #1d3971 100%); box-shadow: 0 14px 32px rgba(29,57,113,.18); }
+        .hero { padding: 2rem 2.1rem; margin: .25rem 0 1.5rem; border-radius: 20px; color: white; background: radial-gradient(circle at 90% 0%, #6785ff 0, transparent 31%), linear-gradient(120deg, #101c35 0%, #1d3971 100%); box-shadow: 0 14px 32px rgba(29,57,113,.18); }
         .hero h1 { color: white; margin: .15rem 0 .35rem; font-size: 2.3rem; letter-spacing: -.04em; }
         .hero p { color: #dbe6ff; margin: 0; font-size: 1.05rem; }
         .eyebrow { color: #a9bcff; font-size: .75rem; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
@@ -171,6 +204,34 @@ def get_data() -> tuple[pd.DataFrame | None, dict | None, str | None]:
     return None, None, None
 
 
+def validate_dataset(df: pd.DataFrame, filename: str) -> None:
+    """Reject files that are too large for safe in-memory processing."""
+    try:
+        config = st.secrets.get("app", {})
+        max_rows = int(config.get("max_rows", 1_000_000))
+        max_columns = int(config.get("max_columns", 500))
+    except (FileNotFoundError, KeyError, TypeError, ValueError):
+        max_rows, max_columns = 1_000_000, 500
+    if len(df) > max_rows:
+        raise ValueError(f"{filename} has too many rows. The maximum supported is {max_rows:,}.")
+    if len(df.columns) > max_columns:
+        raise ValueError(f"{filename} has too many columns. The maximum supported is {max_columns:,}.")
+
+
+def ai_request(action: str, report: dict) -> str | None:
+    """Consume quota and run one AI action without exposing internal errors."""
+    email = str(st.user.get("email", "")).lower().strip() or "authenticated-user"
+    allowed, message = consume_ai_quota(email)
+    if not allowed:
+        st.warning(message)
+        return None
+    st.caption(message)
+    with st.spinner("Preparing an expert review..." if action == "explanation" else "Drafting remediation..."):
+        if action == "explanation":
+            return generate_ai_explanation(report)
+        return generate_fix(report, "SQL" if action == "sql" else "PySpark")
+
+
 def main() -> None:
     require_authentication()
     apply_styles()
@@ -187,12 +248,14 @@ def main() -> None:
             st.session_state.uploaded_file = None
             st.rerun()
         st.divider()
-        st.caption("Your data is profiled locally. AI requests contain only aggregated, anonymized metadata.")
+        st.caption("Privacy: uploads are processed in memory. Raw rows are not sent to OpenAI.")
 
     try:
         df, report, filename = get_data()
-    except Exception as exc:
-        st.error(f"We could not read that file: {exc}")
+        if df is not None:
+            validate_dataset(df, filename or "dataset")
+    except Exception:
+        st.error("We could not safely process that file. Check that it is a valid CSV/Parquet dataset and within the supported limits.")
         return
 
     if df is None or report is None:
@@ -251,20 +314,22 @@ def main() -> None:
 
     with tabs[3]:
         st.subheader("AI interpretation & remediation")
-        st.caption("Uses your OPENAI_API_KEY if configured. Only the generated profile and findings are sent, never raw rows.")
+        st.caption("Only dataset metadata is sent to OpenAI; raw rows and sample cell values are never included.")
         if st.button("Explain detected problems", type="primary"):
-            with st.spinner("Preparing an expert review..."):
-                result = generate_ai_explanation(report)
-            st.markdown(result)
+            result = ai_request("explanation", report)
+            if result:
+                st.markdown(result)
         fix_col1, fix_col2 = st.columns(2)
         with fix_col1:
             if st.button("Generate SQL Fix", width="stretch"):
-                with st.spinner("Drafting SQL..."):
-                    st.code(generate_fix(report, "SQL"), language="sql")
+                result = ai_request("sql", report)
+                if result:
+                    st.code(result, language="sql")
         with fix_col2:
             if st.button("Generate PySpark Fix", width="stretch"):
-                with st.spinner("Drafting PySpark..."):
-                    st.code(generate_fix(report, "PySpark"), language="python")
+                result = ai_request("pyspark", report)
+                if result:
+                    st.code(result, language="python")
 
     with tabs[4]:
         st.subheader("Downloadable report")
