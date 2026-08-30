@@ -35,8 +35,37 @@ for _secret_name in ("OPENAI_API_KEY", "OPENAI_MODEL"):
 ALLOWED_EMAILS: set[str] = set()
 
 
+def auth_is_configured() -> bool:
+    """Return whether Streamlit OIDC authentication has been configured."""
+    try:
+        return bool(st.secrets.get("auth"))
+    except FileNotFoundError:
+        return False
+
+
 def require_authentication() -> None:
     """Require an authenticated OIDC user before loading the application."""
+    if not auth_is_configured():
+        st.title("🩺 DataDoctor AI")
+        st.error("Authentication is not configured yet.")
+        st.markdown(
+            """
+            Add the `[auth]` section to this app's **Streamlit Cloud →
+            Settings → Secrets** and redeploy.
+
+            Required fields:
+            - `redirect_uri`
+            - `cookie_secret`
+            - `client_id`
+            - `client_secret`
+            - `server_metadata_url`
+
+            For Google, `server_metadata_url` is:
+            `https://accounts.google.com/.well-known/openid-configuration`
+            """
+        )
+        st.stop()
+
     if not st.user.is_logged_in:
         st.title("🩺 DataDoctor AI")
         st.subheader("Sign in to continue")
@@ -73,8 +102,7 @@ def show_user_menu() -> None:
         st.caption(f"Signed in as **{name}**")
         if email:
             st.caption(email)
-        if st.button("Sign out", width="stretch"):
-            st.logout()
+        st.button("Sign out", width="stretch", on_click=st.logout)
 
 
 def apply_styles() -> None:
