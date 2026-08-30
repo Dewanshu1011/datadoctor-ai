@@ -27,6 +27,56 @@ for _secret_name in ("OPENAI_API_KEY", "OPENAI_MODEL"):
         pass
 
 
+# -------------------------------------------------------------------
+# Authentication
+# -------------------------------------------------------------------
+# Add approved Google account emails here. If empty, any successfully
+# authenticated OIDC user is allowed to use the application.
+ALLOWED_EMAILS: set[str] = set()
+
+
+def require_authentication() -> None:
+    """Require an authenticated OIDC user before loading the application."""
+    if not st.user.is_logged_in:
+        st.title("🩺 DataDoctor AI")
+        st.subheader("Sign in to continue")
+        st.write(
+            "Sign in with your Google account to use DataDoctor AI. "
+            "Your dataset is still profiled locally."
+        )
+        st.button(
+            "Continue with Google",
+            type="primary",
+            width="stretch",
+            on_click=st.login,
+        )
+        st.stop()
+
+    email = str(st.user.get("email", "")).lower().strip()
+    allowed = {address.lower().strip() for address in ALLOWED_EMAILS}
+
+    if allowed and email not in allowed:
+        st.error("Your account is not authorized to use DataDoctor AI.")
+        if email:
+            st.caption(f"Signed in as: {email}")
+        st.button("Sign out", on_click=st.logout)
+        st.stop()
+
+
+def show_user_menu() -> None:
+    """Display the authenticated user's identity and logout control."""
+    email = str(st.user.get("email", ""))
+    name = str(st.user.get("name", "")) or email or "Authenticated user"
+
+    with st.sidebar:
+        st.divider()
+        st.caption(f"Signed in as **{name}**")
+        if email:
+            st.caption(email)
+        if st.button("Sign out", width="stretch"):
+            st.logout()
+
+
 def apply_styles() -> None:
     st.markdown(
         """<style>
@@ -94,7 +144,9 @@ def get_data() -> tuple[pd.DataFrame | None, dict | None, str | None]:
 
 
 def main() -> None:
+    require_authentication()
     apply_styles()
+    show_user_menu()
     st.markdown("<div class='hero'><div class='eyebrow'>Data quality intelligence</div><h1>DataDoctor AI</h1><p>Find, understand, and fix data issues before they reach production.</p></div>", unsafe_allow_html=True)
 
     with st.sidebar:
